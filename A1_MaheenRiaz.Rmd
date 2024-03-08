@@ -1,0 +1,370 @@
+---
+title: "Assignment 1 - Dataset Selection & Initial Processing"
+author: "Maheen Riaz"
+output: 
+  html_document:
+    toc: true
+    smooth_scroll: true # change to false 
+    toc_float: true 
+    toc_depth: 6
+---
+
+In this assignment, data in-take from Gene Expression Omnibus (GEO), clean up, normalization, and initial observations will be conducted.
+
+### Data set Selection
+
+Status: Approved by instructor
+
+-   [GSE117221: Gender-specific transcriptional profiles identified in β-thalassemia patients](https://www-ncbi-nlm-nih-gov.myaccess.library.utoronto.ca/geo/query/acc.cgi?acc=GSE117221)
+    -   Organism: Homo Sapien
+    -   Expression type: Expression profiling by high throughput sequencing
+    -   [Citation](https://www-ncbi-nlm-nih-gov.myaccess.library.utoronto.ca/pmc/articles/PMC8018115/)
+    -   Sample size: 49
+
+### Initial Processing
+
+###### Data intake
+
+```{r, GEOquery, collapse = TRUE}
+# install GEOquery package (Davis and Meltzer, 2007)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("GEOquery", force = TRUE)
+```
+
+```{r, Pull data from GEO, collapse = TRUE}
+library(GEOquery)
+dataset_geoid <- "GSE117221" # data id
+gse <- getGEO(dataset_geoid, GSEMatrix = FALSE)
+gse@header$summary
+```
+
+```{r, Get information from the dataset, collapse = TRUE}
+gpl <- names(GPLList(gse))[1]
+gpl_info <- Meta(getGEO(gpl))
+gpl_info$title
+gpl_info$last_update_date
+gpl_info$organism
+gpl_info$submission_date
+length(gpl_info$series_id)
+length(gpl_info$sample_id)
+
+```
+
+**Platform title** : Illumina HiSeq 2000 (Homo sapiens)
+
+**Submission date** : Nov 02 2010
+
+**Last update date** : Mar 27 2019
+
+**Organism** : Homo sapiens
+
+**Number of GEO data sets that use this technology** : 10189
+
+**Number of GEO samples that use this technology** : 178979
+
+```{r, eval=FALSE, include=FALSE, "Supplementary files"}
+#set location
+download_dir <- file.path(getwd())
+# get supplementary file names
+supfile = getGEOSuppFiles(dataset_geoid, fetch_files = FALSE)
+supfile$fname
+zip_file <- supfile$fname[10]
+  zipp <- file.path(download_dir, "GSE117221", zip_file)
+  # Unzip the file
+untar(tarfile = zipp, exdir = file.path(download_dir, "GSE117221"))
+
+ # Make a list of files
+raw_data <- list.files(file.path(download_dir, "GSE117221"))
+
+  #subset it 
+raw_data_files <- raw_data[11:59]
+  # since the files are scattered join them into a dataset 
+data_frame <- list()
+for (file in raw_data_files) {
+  data <- read.table(file.path(download_dir, "GSE117221", file), header = TRUE)
+  if (any(duplicated(data$A1BG))) {
+    print(paste("Duplicates", file))
+  }
+  data_frame[[file]] <- data
+}
+
+main_dataset <- data_frame[[1]]
+for (i in 2:length(data_frame)) {
+  main_dataset <- merge(main_dataset, data_frame[[i]], by = "A1BG", all = TRUE)}
+
+  #save it
+write.table(main_dataset, file = "main_dataset.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```
+
+**Read in expression**
+
+```{r, eval=FALSE, include=FALSE, "Get the Expression Data"}
+
+#check to see if the file exists already before you download them
+# only download files that we don't have from the set of supplementary files
+missing_files <- supfile$fname[!unlist(
+  lapply(supfile$fname, FUN=function(x){
+    file.exists(
+      file.path(download_dir,dataset_geoid,x))}))]
+
+if(length(missing_files) >0){
+for(i in 1:length(missing_files)){
+  supfiles = getGEOSuppFiles(dataset_geoid,
+  filter_regex = missing_files[i],
+  baseDir = download_dir,
+  fetch_files = TRUE)}}
+```
+
+**Read in the data**
+
+```{r, eval=FALSE, include=FALSE, "Read Data"}
+all_samples <- read.table(
+  file.path(download_dir,"main_dataset.txt"),
+    header=TRUE,
+      check.names=TRUE)
+dim(all_samples)
+```
+
+```{r, eval=FALSE, include=FALSE, "Table Data"}
+knitr::kable(all_samples[1:10,1:15], format = "html")
+```
+
+```{r, eval=FALSE, include=FALSE, "Column names"}
+colnames(all_samples)[1:50]
+
+```
+
+```{r, collapse = TRUE}
+ # load count table from GEO
+#set location
+download_dir <- file.path(getwd())
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+  path <- paste(urld, "acc=GSE117221", "file=GSE117221_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+  main_data_tbl <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames=1)
+# display the table
+  knitr::kable(main_data_tbl[1:10,1:15], format = "html")
+
+```
+
+Find characteristics
+```{r}
+gse@gsms[[1]]@header$characteristics_ch1
+```
+
+```{r}
+gse@gsms[[1]]@header$title
+```
+
+```{r}
+gse@gsms[[1]]@header$geo_accession
+```
+
+Replace headers so they correspond with sample
+```{r, collapse = TRUE}
+for (i in 1:length(gse@gsms)) {
+  colnames(main_data_tbl)[i] <- gse@gsms[[i]]@header$title
+}
+# display the table
+  knitr::kable(main_data_tbl[1:10,1:15], format = "html")
+```
+**Annotations** (Nanou et al., 2021):
+
+-   TM: β-thalassemia Major
+
+-   TI: β-thalassemia intermedia
+
+-   H: Healthy
+
+-   M: Male
+
+-   F: Female
+
+
+###### Map to HUGO symbols
+```{r, HUGO Symbols, collapse = TRUE}
+# have to use CRAN mirror bcz of knitting issues
+options(repos = "https://cran.stat.sfu.ca/")
+
+install.packages("BiocManager")
+BiocManager::install("ensembldb")
+install.packages("biomaRt")
+library(biomaRt)
+ensembl_dataset <- "hsapiens_gene_ensembl"
+ensembl <- useMart("ensembl", dataset = ensembl_dataset)
+  #convert Human Ensembl Gene Ids to HGNC symbols
+gene_id <- rownames(main_data_tbl)
+id_conversion <- getBM(attributes = c("entrezgene_id","hgnc_symbol"),
+                            filters = c("entrezgene_id"),
+                            values = gene_id,
+                            mart = ensembl)
+entrez_symbol <- setNames(id_conversion$hgnc_symbol, id_conversion$entrezgene_id)
+main_data_hugo <- main_data_tbl
+rownames(main_data_hugo) <- entrez_symbol[rownames(main_data_hugo)]
+knitr::kable(main_data_hugo[1:10,1:15], format = "html")
+```
+
+```{r}
+dim(main_data_hugo)
+```
+
+###### Data clean-up
+
+**Remove Outliers and NA**
+Remove rows that were not able to map to symbols were assigned NA notation. They do have identifiers as numbers without a "prefix id". In the future, mapping of such genes is possible.
+```{r, NA clean up, collapse = TRUE}
+clean_data <- main_data_hugo[!is.na(rownames(main_data_hugo)) & !duplicated(rownames(main_data_hugo)),]
+dim(clean_data)
+```
+Note that the gene number reduced with a difference of 14,775.
+
+
+```{r, Gene Count and remove Outliers, collapse = TRUE}
+  # get freq
+gene_freq <- data.frame(Gene = rownames(clean_data), Freq = rowSums(clean_data))
+knitr::kable(gene_freq[1:10,], format = "html")
+
+```
+
+```{r, collapse = TRUE}
+BiocManager::install("limma", force = TRUE) #have to force it bcz its not compatible with this version of R
+BiocManager::install("edgeR")
+library(edgeR)
+# keep counts that are >1 cpms and remove the rest 
+cpm_count <- cpm(clean_data)
+ # 3 minimum samples
+keep = rowSums(cpm_count >1) >=3
+filtered_data = clean_data[keep, ]
+dim(filtered_data)
+```
+Note. the number decreased even more.
+
+
+```{r, Filtered Count, collapse = TRUE}
+filtered_freq <- data.frame(Gene = rownames(filtered_data), Freq = rowSums(filtered_data))
+knitr::kable(filtered_freq[1:10,], format = "html")
+```
+
+### Apply Normalization
+Use TMM to normalize counts 
+```{r, Normalization, collapse = TRUE}
+library(edgeR)
+# Create an edgeR container for RNASeq count data
+d = DGEList(counts=filtered_data)
+
+#calculate normalization factors
+d = calcNormFactors(d)
+#get the normalized data
+normalized_counts <- cpm(d)
+
+knitr::kable(normalized_counts[1:10,], format = "html")
+```
+
+```{r, collapse = TRUE}
+#apply normalization to freq data 
+
+d_filter = DGEList(counts=filtered_freq)
+
+#calculate normalization factors
+d_filter = calcNormFactors(d_filter)
+#get the normalized data
+normalized_freq <- cpm(d_filter)
+
+knitr::kable(normalized_freq[1:10,], format = "html")
+```
+
+
+```{r, warning=FALSE, Plots}
+# make box plots 
+library(edgeR)
+par(mfrow=c(1, 2))
+
+  # boxplot for original
+boxplot(log2(edgeR::cpm(filtered_data)), main = "Original Counts", 
+        xlab = "Sample", ylab = "log2 CPM", cex.axis = 0.02)
+
+  # boxplot for normalized 
+boxplot(log2(normalized_counts), main = "Normalized", 
+        xlab = "Sample", ylab = "log2 CPM", cex.axis = 0.02)
+```
+Note. the normalized plots appears to be more coherent as compared to original. This idicates that normlaization has singifnicantly reduce varibaility within the that data as it appears homogenous. In terms, of labelling I had to make the size 1 because of knitting issues. The plot represets all samples and conditons. 
+
+
+```{r, MDS Plot, collapse = TRUE}
+# assign specific conditions
+sample_info <- gsub("Sample_(\\d+)-(\\w+)_.*", "\\1-\\2", colnames(normalized_counts))
+sample_num <- gsub("^(\\d+)-.*", "\\1", sample_info)
+Condition <- gsub("^\\d+-(\\w+)$", "\\1", sample_info)
+
+# MDS plot 
+mds_plot <- limma::plotMDS(d, labels = NULL, pch = 1,
+                            col = c("red", "purple", "green")[factor(Condition)])
+# Legend
+legend("topright",
+       legend = levels(factor(Condition)),
+       pch = c(1), col = c("red", "purple", "green"),
+       title = "Class",
+       bty = 'n', cex = 0.75)
+
+```
+Note. The MDS represents the distance between samples based on the conditions. 
+
+
+### Interpretations and Observations
+
+1. Why is the dataset of interest to you?
+  + β-thalassemia is a prevalent condition in South Asia (Hossain et al., 2017). Since I am from region, it has been a topic of interest to me. Furthermore, the presence of condition among my family members have also provided me with insight into lives of its carriers. Therefore, for this assignment I wanted to focus on this condition. 
+  
+  
+2. What are the control and test conditions of the data set?
+  + The control condition were healthy (H) participants while test conditons were Thalassemia Major (TM) and Thalassemia Intermedia (TI)
+  
+  
+3. How many samples in each of the conditions of your dataset?
+  + H: 17 samples 
+  + TM: 16 samples
+  + TI: 16 samples
+
+
+4. Were there expression values that were not unique for specific genes? How did you handle these?
+  + Removing low count values helped with duplicates that can be classified as non-unique
+
+
+5. Were there expression values that could not be mapped to current HUGO symbols?
+  + Yes, and they were removed. However, it was noted that just because they could not be mapped at present, there will always be a possibility that through updates mapping of such expression is possible
+  
+  
+6. Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?
+  + The original study handled outliers through statistical tests, Principal Component Analysis and removal of low quality samples (Nanou et al., 2021). In this report, anything less than 1 cpm count were removed. 
+  
+  
+7.How did you handle replicates?
+  + Removal of duplicates (chunk 16)
+  + Normalization - TMM
+  
+  
+8. What is the final coverage of your dataset?
+  + 14,072
+
+
+### References
+
+Anders, S., McCarthy, D. J., Chen, Y., Okoniewski, M., Smyth, G. K., Huber, W., & Robinson, M. D. (2013).             Count-based differential expression analysis of RNA sequencing data using R and Bioconductor. *Nature           Protocols*, 8(9), Article 9. https://doi.org/10.1038/nprot.2013.099
+
+
+Davis S, Meltzer P (2007). GEOquery: a bridge between the Gene Expression Omnibus (GEO) and BioConductor.             *Bioinformatics*, 14, 1846–1847. https://doi.org/doi:10.18129/B9.bioc.GEOquery
+
+
+Evans, C., Hardin, J., & Stoebel, D. M. (2018). Selecting between-sample RNA-Seq normalization methods from the       perspective of their assumptions. *Briefings in Bioinformatics*, 19(5), 776–792.                                https://doi.org/10.1093/bib/bbx008
+
+
+Hossain, M. S., Raheem, E., Sultana, T. A., Ferdous, S., Nahar, N., Islam, S., Arifuzzaman, M., Razzaque, M. A.,        Alam, R., Aziz, S., Khatun, H., Rahim, A., & Morshed, M. (2017). Thalassemias in South Asia: Clinical           lessons learnt from Bangladesh. *Orphanet Journal of Rare Diseases*, 12, 93. 
+       https://doi.org/10.1186/s13023-017-0643-z
+
+
+Robinson, M. D., & Oshlack, A. (2010). A scaling normalization method for differential expression analysis of         RNA-seq data. *Genome Biology*, 11(3), R25. https://doi.org/10.1186/gb-2010-11-3-r25
+
+
+Xie, Y., Allaire, J. J., & Grolemund, G. (2023). R Markdown: The Definitive Guide. *Chapman & Hall/CRC*. 
+           https://bookdown.org/yihui/rmarkdown/html-document.html
