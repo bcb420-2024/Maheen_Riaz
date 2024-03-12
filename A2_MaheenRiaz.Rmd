@@ -1,0 +1,367 @@
+---
+title: "Assignment 2 - Differential Gene expression and Preliminary ORA"
+author: "Maheen Riaz"
+output: 
+  html_document:
+    toc: true
+    smooth_scroll: true  # smoother navigation to sections
+    toc_float: true # creates a floating TOC on the side of the report
+    toc_depth: 6
+---
+
+In this assignment, data in-take from Gene Expression Omnibus (GEO), differential gene expression, thresholded over-representation analysis, and interpretations will be conducted.
+
+### Data set Selection
+
+Status: Approved by instructor
+
+-   [GSE117221: Gender-specific transcriptional profiles identified in β-thalassemia patients](https://www-ncbi-nlm-nih-gov.myaccess.library.utoronto.ca/geo/query/acc.cgi?acc=GSE117221)
+    -   Organism: Homo Sapien
+    -   Expression type: Expression profiling by high throughput sequencing
+    -   [Citation](https://www-ncbi-nlm-nih-gov.myaccess.library.utoronto.ca/pmc/articles/PMC8018115/)
+    -   Sample size: 49
+    -   Conditions:
+        -   Healthy (H) participants (Control) - 17 samples
+        -   Thalassemia Major (TM) (Test) - 16 samples
+        -   Thalassemia Intermedia (TI) (Test) - 16 samples
+
+### Introduction
+
+β-thalassemia is a prevalent condition in South Asia (Hossain et al., 2017). Nanou et al. (2021) explored the transicrptional difference between TI and TM patients with a focus on sex differences. Data was downloaded from GEOquery in Gene Expression Omnibus (GEO) database. The supplementary data available on GEO was already normalized and lacked GSE ids, meaning that gene symbols and names were already assigned. This would've left the analysis incomplete for the Assignment because raw data was not available anywhere. Upon discussion with Professor Isserlin, the beta version of standardized raw RNA-seq counts recently released by GEO was used through the following commands;
+
+```{r, eval=FALSE, include=TRUE}
+
+## This chunk is set to not run. It is here purely for demonstration purposes of how raw counts were pulled from GEO in Assignment 1.
+
+ # load count table from GEO using the new beta version released by GEO
+#set location
+download_dir <- file.path(getwd())
+#pull data 
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+  path <- paste(urld, "acc=GSE117221", "file=GSE117221_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+  main_data_tbl <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames=1)
+# display the table
+  knitr::kable(main_data_tbl[1:10,1:15], format = "html")
+```
+
+It was then mapped to HUGO symbols, cleaned up and TMM normalization was used. After normalization, it was noted that data appeared homogeneous and variability within the data was significantly reduced as compared to the original. The final coverage of the data-set was 14,072.
+
+### Differential Gene Expression
+
+```{r message=FALSE, warning=FALSE}
+
+# Install and load all the required packages 
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+system("BiocManager::install('limma', force = TRUE) > /dev/null 2>&1", ignore.stdout = TRUE, ignore.stderr = TRUE) #have to force it bcz its not compatible with this version of R
+
+BiocManager::install("ComplexHeatmap")
+
+library(BiocManager)
+library(GEOquery)
+library(biomaRt)
+library(edgeR)
+library(limma)
+library(knitr)
+library(ComplexHeatmap)
+knitr::opts_chunk$set(include = TRUE)
+```
+
+```{r echo=TRUE}
+## load datasets from Assignment 1
+filtered_data <- readRDS("filtered_data.rds")
+filtered_freq <- readRDS("filtered_freq.rds")
+normalized_counts <- readRDS("normalized_counts.rds")
+normalized_freq <- readRDS("normalized_freq.rds")
+```
+
+```{r}
+# Make a model design 
+
+# Specify participant type based on the condition (H, TM, TI) they posses
+filter_c <- colnames(filtered_data)
+
+# Specify condition type into broader categories (such as H, TM & TI)
+type_cond <- sub("_.*", "", filter_c)
+type_cond_b <- ifelse(grepl("-H", filter_c), "H", "TM")
+
+# assign the types and construct a model design 
+model_design <- model.matrix(~ 0 + type_cond_b)
+ # reassign column names to the model
+colnames(model_design) <- levels(factor(type_cond_b))
+# display the first five obs
+model_design[1:5,]
+```
+
+```{r}
+# edgeR model will be used for the differential gene expression. 
+
+d2 = DGEList(counts=filtered_data, group=type_cond_b)
+
+# Estimate dispersion
+d2 <- estimateDisp(d2, model_design)
+
+# Fit the model
+fit <- glmQLFit(d2, model_design)
+
+# Calculate differential expression using the Quasi likelihood model (glmQLFTest). For this assignment H (control) and TM will be compared. This is because Nanou et al. (2021) found more deviated expression genes between healthy and TM patients. Furthermore, the lack of difference between TM and TI was determined because most differentially expressed genes in TI were also found in TM (Nanou et al., 2021). 
+
+# instead of coefficient it will be contrast to identify differences between H vs TM
+qlf.H_vs_TM <- glmQLFTest(fit, contrast=c(-1,1))
+
+# Make a table
+kable(topTags(qlf.H_vs_TM), 
+      type = "html", 
+      row.names = TRUE, 
+      caption = "<div style='text-align: left; vertical-align: top;'>Table 1. Results of differential expression using the Quasi likelihood model (glmQLFTest) for Healthy vs TM participants. </div>")
+
+```
+
+```{r}
+# results 
+qlf_output_HvTM <- topTags(qlf.H_vs_TM,
+                                sort.by = "PValue",
+                                n = nrow(normalized_counts))
+```
+
+1.  Calculate p-values for each of the genes in your expression set. How many genes were significantly deferentially expressed? What thresholds did you use and why?
+
+```{r}
+# How many gene pass the threshold p-value < 0.05?
+gene_p <- length(which(qlf_output_HvTM$table$PValue < 0.05))
+gene_p
+```
+
+-   The threshold p-value for statistical significant was set to be p < 0.05. In Assignment 1, the final coverage of the data was calculated to be 14,072, out of which 2472 genes were significantly deferentially expressed.
+
+2.  Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction?
+
+```{r}
+# How many genes pass correction?
+gene_FDR <- length(which(qlf_output_HvTM$table$FDR < 0.05))
+gene_FDR
+```
+
+-   Genes that have passed correction indicate that their quality has increased. Benjamni-hochberg correction method was used which resulted 586 genes passing the correction with FDR < 0.05 threshold. Benjamni - hochberg was used to control the false discovery rate (FDR). 
+
+3.  Show the amount of deferentially expressed genes using an MA Plot or a Volcano plot. Highlight genes of interest.
+
+```{r}
+# In order to find gene of interest we can look at genes that have the highest statistical significance as well topTags obtained from differential expression.
+
+# pull gene names that pass the threshold of p< 0.05
+gene_interest_p <-rownames(qlf_output_HvTM$table)[order(qlf_output_HvTM$table$PValue)][1:5]
+
+# pull gene names that pass the threshold of FDR< 0.05
+gene_interest_FDR <- rownames(qlf_output_HvTM$table)[order(qlf_output_HvTM$table$FDR)][1:5]
+
+# make a table to see genes for both FDR and p<0.05
+
+interesting_genes <- data.frame(Gene_p = gene_interest_p, Gene_FDR = gene_interest_FDR)
+
+kable(interesting_genes, caption = "<div style='text-align: left; vertical-align: top;'>Table 2. Genes of interest based on highest statistical significance of p < 0.05 and FDR threshold of < 0.05 for Healthy and TM participants. </div>", format = "html")
+
+# make a list of those genes 
+
+gene_interest_list <- list("OTOAP1", "NIPAL4", "FAM177B", "SESN2", "NUPR1")
+
+```
+
+
+#### MA Plot
+```{r}
+# Make an MA plot to show the amount of deferentially expressed genes. MA plot is because it includes the average expression between the conditions. 
+
+# assign colours to gene of interests
+
+gene_col <- c("red", "blue", "green", "orange", "purple")
+
+par(mar = c(6, 4, 4, 4) + 0.1) # change plot margins so the caption fits
+
+plot(qlf.H_vs_TM$table$logCPM, 
+     qlf.H_vs_TM$table$logFC, 
+     xlim = c(min(qlf.H_vs_TM$table$logCPM), max(qlf.H_vs_TM$table$logCPM)),
+     ylim = c(min(qlf.H_vs_TM$table$logFC), max(qlf.H_vs_TM$table$logFC)),
+     xlab = "logCPM",
+     ylab = "Log-Fold Change (logFC)",
+     main = "MA Plot: Differential Gene Expression in Healthy vs TM Participants",
+     col = "gray", pch = 16)
+
+## highlight genes of interest
+for (i in 1:length(gene_interest_list)) {
+  gene <- gene_interest_list[i]
+  idx <- match(gene, rownames(qlf_output_HvTM$table))
+  if (!is.na(idx)) {
+    points(qlf_output_HvTM$table$logCPM[idx], 
+           qlf_output_HvTM$table$logFC[idx], 
+           col = gene_col[i], pch = 16)
+  }
+}
+## set the rest of the genes to be gray
+rest_genes <- setdiff(rownames(qlf_output_HvTM$table), gene_interest_list)
+points(qlf_output_HvTM$table$logCPM[rest_genes], 
+       qlf_output_HvTM$table$logFC[rest_genes], 
+       col = "gray", pch = 16)
+
+# add a legend
+legend_names <- c(gene_interest_list, "Other Genes")
+legend("topright", legend = legend_names, 
+       col = c(gene_col, "gray"), pch = 16, cex = 0.6)
+
+
+
+```
+
+
+Figure 1. MA plot of differential gene expression for Healthy vs TM participants
+
+#### Heat Map
+```{r}
+# Heatmap of top hits using the Quasi likelihood model (p-value < 0.05)
+
+ht_opt$message = FALSE # supress the message
+
+top_hits <- rownames(qlf_output_HvTM$table)[qlf_output_HvTM$table$PValue<0.05]
+
+heatmap_matrix_tophits <- t(
+  scale(t(normalized_counts[which(rownames(normalized_counts)
+   %in% top_hits),])))
+
+if (min(heatmap_matrix_tophits) == 0) {
+  heatmap_col <- colorRampPalette(c("white", "red"))(100)
+} else {
+  heatmap_col <- colorRampPalette(c("blue", "white", "red"))(100)
+}
+
+
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                          cluster_rows = TRUE,
+                          cluster_columns = TRUE,
+                              show_row_dend = TRUE,
+                              show_column_dend = TRUE,
+                              col=heatmap_col,
+                              show_column_names = FALSE,
+                              show_row_names = FALSE,
+                              show_heatmap_legend = TRUE,
+                              )
+
+draw(current_heatmap) 
+```
+
+
+Figure 2. Heatmap of top hits using the Quasi likelihood model (p-value < 0.05) for Healthy and TM participants
+
+
+
+4.  Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+
+- The heatmap is majority blue in colour indicating that the number of regulated genes is far greater than regulated genes. There was no clustering because the matrix only ever contained the two conditions; Healthy and TM. Furthermore, the greater number of downregulated genes was supported by the count conducted below; 1804 genes.The genes of interests were also downregulated. 
+
+
+### Thresholded over-representation analysis
+
+With your significantly up-regulated and down-regulated set of genes run a thresholded gene set enrichment analysis
+
+```{r}
+# How many genes are up regulated?
+
+length(which(qlf_output_HvTM$table$PValue < 0.05
+             & qlf_output_HvTM$table$logFC > 0))
+```
+
+```{r}
+# How many genes are down regulated?
+length(which(qlf_output_HvTM$table$PValue < 0.05
+             & qlf_output_HvTM$table$logFC < 0))
+```
+
+```{r}
+# Make a threshold list of genes
+
+# list for upregulated genes
+upregulated_genes <- rownames(qlf_output_HvTM$table)[
+  which(qlf_output_HvTM$table$PValue < 0.05 & qlf_output_HvTM$table$logFC > 0)]
+
+# list for downregulated genes
+downregulated_genes <- rownames(qlf_output_HvTM$table)[
+  which(qlf_output_HvTM$table$PValue < 0.05 & qlf_output_HvTM$table$logFC < 0)]
+
+# Write tables for both
+write.table(x = upregulated_genes,
+            file = file.path(getwd(), "ovrecurrent_upregulated_genes.txt"),
+            sep = "\t", row.names = FALSE,
+            col.names = FALSE, quote = FALSE)
+
+write.table(x = downregulated_genes,
+            file = file.path(getwd(), "ovrecurrent_downregulated_genes.txt"),
+            sep = "\t", row.names = FALSE,
+            col.names = FALSE, quote = FALSE)
+```
+
+
+1.  Which method did you choose and why?
+
+- I used the GeneTrail for ORA becuase it has variation in terms of pathways and annotation sources. Furthermore, it will help in determining pathways relevant to upregulated and downregulated genes. 
+
+2.  What annotation data did you use and why? What version of the annotation are you using?
+
+- GeneCards: The Human Gene Database because it is quite well know and was recently updated in Jan 24, 2024. 
+
+3.  How many genesets were returned with what thresholds?
+
+- There were 668 upregualted genes and 1804 downregulated genes with a threshold of p< 0.05 and logFC < 0. 
+
+4.  Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+- The analysis exhibits the same results as the study, meaning that there were a majority of downregulated gens over all. Furthermore, of all the differentially expressed genes in TI were also found common in TM in comparison to H. 
+
+![Figure 3. Example of analysis conducted in geneTrail for upregualted genes.](/Users/maheenriaz/Desktop/BCB420/GeneTrail.jpeg)
+
+
+
+
+![Figure 4. Example of analysis conducted in geneTrail compraing upregualted and downregulated genes.](/Users/maheenriaz/Desktop/BCB420/both.jpeg)
+
+
+### Interpretation
+
+1.  Do the over-representation results support conclusions or mechanism discussed in the original paper?
+
+- Yes, both all differentially expressed genes between TM and TI are overlapped and and consistence when comparing to healthy participants. Furthermore, the study Nanou et al.( (2021) found that most genes were down regulated and the results in this assignment are consistent to it meaning that genes responsible for cellular and biological mechanism are overly downregulated in TM patients. 
+
+2.  Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.
+
+- Yes, Taghavifar et al. (2019) also found the significance in down regulated genes with in thalasemia patients menaing that cellular and biological processes are deterred. 
+
+
+### References
+
+
+Anders, S., McCarthy, D. J., Chen, Y., Okoniewski, M., Smyth, G. K., Huber, W., & 
+
+*ComplexHeatmap.* (2022). *Bioconductor.* Retrieved March 12, 2024, from http://bioconductor.org/packages/ComplexHeatmap/
+
+Durinck, S., Moreau, Y., Kasprzyk, A., Davis, S., De Moor, B., Brazma, A., & Huber, W. (2005). BioMart and Bioconductor: A powerful link between biological databases and microarray data analysis. *Bioinformatics, 21*(16), 3439–3440. https://doi.org/10.1093/bioinformatics/bti525
+
+Geistlinger, L., Csaba, G., Santarelli, M., Ramos, M., Schiffer, L., Turaga, N., Law, C., Davis, S., Carey, V., Morgan, M., Zimmer, R., & Waldron, L. (2021). Toward a gold standard for benchmarking gene set enrichment analysis. *Briefings in Bioinformatics, 22*(1), 545–556. https://doi.org/10.1093/bib/bbz158
+
+Gu Z, Eils R, Schlesner M (2016). “Complex heatmaps reveal patterns and correlations in multidimensional genomic data.” *Bioinformatics.* doi:10.1093/bioinformatics/btw313.
+
+Haematologica, *106*(4), 1207–1211. https://doi.org/10.3324/haematol.2020.248013
+
+Hossain, M. S., Raheem, E., Sultana, T. A., Ferdous, S., Nahar, N., Islam, S., Arifuzzaman, M., Razzaque, M. A., Alam, R., Aziz, S., Khatun, H., Rahim, A., & Morshed, M. (2017). Thalassemias in South Asia: Clinical lessons learnt from Bangladesh. *Orphanet Journal of Rare Diseases, 12*, 93. https://doi.org/10.1186/s13023-017-0643-z
+
+Lawrence, M., Huber, W., Pagès, H., Aboyoun, P., Carlson, M., Gentleman, R.& Carey, V. J. (2021). *BiocManager:* Access the Bioconductor Project Package Repository. *R package version 1.30.15.*
+
+Nanou, A., Toumpeki, C., Fanis, P., Bianchi, N., Cosenza, L. C., Zuccato, C., Sentis, G., Giagkas, G., Stephanou, C., Phylactides, M., Christou, S., Hadjigavriel, M., Sitarou, M., Lederer, C. W., Gambari, R., Kleanthous, M., & Katsantoni, E. (2021). Sex-specific transcriptional profiles identified in β-thalassemia patients. 
+
+*R: MA-plot of a differential testing result.* (n.d.). Retrieved March 11, 2024, from https://search.r-project.org/CRAN/refmans/RNAseqQC/html/plot_ma.html
+
+Ritchie, M. E., Phipson, B., Wu, D., Hu, Y., Law, C. W., Shi, W., & Smyth, G. K. (2015). Limma powers differential expression analyses for RNA-sequencing and microarray studies. *Nucleic Acids Research, 43*(7), e47. https://doi.org/10.1093/nar/gkv007
+
+Robinson, M. D., McCarthy, D. J., & Smyth, G. K. (2010). edgeR: A Bioconductor package for differential expression analysis of digital gene expression data. *Bioinformatics, 26*(1), 139–140. https://doi.org/10.1093/bioinformatics/btp616
+
+Robinson, M. D. (2013). Count-based differential expression analysis of RNA sequencing data using R and Bioconductor. *Nature Protocols, 8*(9), Article 9. https://doi.org/10.1038/nprot.2013.099
+
+Taghavifar, F., Hamid, M., & Shariati, G. (2019). Gene expression in blood from an individual with β‐thalassemia: An RNA sequence analysis. *Molecular Genetics & Genomic Medicine, 7*(7), e00740. https://doi
